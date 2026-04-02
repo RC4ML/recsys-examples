@@ -8,7 +8,7 @@ from configs import InferenceHSTUConfig, KVCacheConfig
 from datasets.utils import Batch
 from modules.hstu_processor import HSTUBlockPostprocessor, HSTUBlockPreprocessor
 from modules.jagged_data import JaggedData
-from modules.paged_hstu_infer_layer import PagedHSTUInferLayer
+from modules.paged_hstu_layer import PagedHSTULayer
 from torchrec.sparse.jagged_tensor import JaggedTensor
 
 
@@ -31,9 +31,9 @@ class HSTUBlockInference(torch.nn.Module):
         self._preprocessor = HSTUBlockPreprocessor(config, is_inference=True)
         self._postprocessor = HSTUBlockPostprocessor(is_inference=True)
 
-        self._attention_layers = torch.nn.ModuleList(
+        self._hstu_layers = torch.nn.ModuleList(
             [
-                PagedHSTUInferLayer(config, kvcache_config, layer_idx)
+                PagedHSTULayer(config, kvcache_config, layer_idx)
                 for layer_idx in range(self.config.num_layers)
             ]
         )
@@ -57,7 +57,7 @@ class HSTUBlockInference(torch.nn.Module):
         """
         with torch.inference_mode():
             jd = self._preprocessor(embeddings, batch)
-            for hstu_layer in self._attention_layers:
+            for hstu_layer in self._hstu_layers:
                 jd = hstu_layer(jd)
             return self._postprocessor(jd)
 
@@ -72,12 +72,13 @@ class HSTUBlockInference(torch.nn.Module):
     ) -> torch.Tensor:
         if self._hstu_graph is None or not use_cudagraph or jd.scaling_seqlen != -1:
             hidden_data = hidden_states
-            for hstu_layer in self._attention_layers:
+            for hstu_layer in self._hstu_layers:
                 hidden_data = hstu_layer.forward_naive(
                     batch_size, num_tokens, hidden_data, jd, kv_cache_metadata
                 )
             return hidden_data
         else:
+            raise NotImplementedError("CUDAGraph path is not supported yet.")
             return self.predict_cudagraph(
                 batch_size,
                 num_tokens,
