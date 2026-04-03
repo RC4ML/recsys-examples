@@ -20,13 +20,20 @@ class PagedHSTULayer(torch.nn.Module):
         config: InferenceHSTUConfig,
         kvcache_config: KVCacheConfig,
         layer_idx: int,
+        enable_buffer: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        self._attn_layer = PagedHSTUInferLayer(config, kvcache_config, layer_idx)
+        self._enable_buffer = enable_buffer
+        self._attn_layer = PagedHSTUInferLayer(
+            config,
+            kvcache_config,
+            layer_idx,
+            enable_buffer=enable_buffer,
+        )
         self._ffn_layer = FFNLayer(config)
         # Keep output buffer contract used by HSTUBlockInference cudagraph path.
-        self.output_buffer_ = self._ffn_layer.output_buffer_
+        self.output_buffer_ = self._attn_layer.output_buffer_
 
     @torch.inference_mode()
     def forward(self, jd: JaggedData) -> JaggedData:
@@ -75,6 +82,9 @@ class PagedHSTULayer(torch.nn.Module):
         jd: JaggedData,
         kv_cache_metadata,
     ) -> torch.Tensor:
+        if not self._enable_buffer:
+            raise RuntimeError("forward_input is disabled when enable_buffer=False")
+
         return cast(
             torch.Tensor,
             self._attn_layer.forward_input(
@@ -95,6 +105,9 @@ class PagedHSTULayer(torch.nn.Module):
         jd: JaggedData,
         kv_cache_metadata,
     ) -> torch.Tensor:
+        if not self._enable_buffer:
+            raise RuntimeError("forward_output is disabled when enable_buffer=False")
+
         attn_output = cast(
             torch.Tensor,
             self._attn_layer.forward_output(

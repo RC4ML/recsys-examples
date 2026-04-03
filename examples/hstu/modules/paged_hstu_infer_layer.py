@@ -40,9 +40,11 @@ class PagedHSTUInferLayer(torch.nn.Module):
         config: InferenceHSTUConfig,
         kv_cache_config: KVCacheConfig,
         layer_idx: int,
+        enable_buffer: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        self._enable_buffer = enable_buffer
         self._embedding_dim: int = config.hidden_size
         # per head dim;
         self._linear_dim_per_head: int = config.head_dim
@@ -129,24 +131,28 @@ class PagedHSTUInferLayer(torch.nn.Module):
             param.copy_(torch.randn_like(param))
         self._linear_proj_weight = self._linear_proj.weight.T.contiguous()
 
-        # output buffer
-        max_num_tokens = config.max_batch_size * config.max_seq_len
-        self.output_buffer_ = torch.empty(
-            (max_num_tokens, config.hidden_size),
-            dtype=dtype,
-            device=device,
-            requires_grad=False,
-        )
-        self.uvqk_buffer_ = torch.empty(
-            (
-                max_num_tokens,
-                (self._linear_dim_per_head * 2 + self._attention_dim_per_head * 2)
-                * self._num_heads,
-            ),
-            dtype=dtype,
-            device=device,
-            requires_grad=False,
-        )
+        # Optional buffers are only needed by split forward_input/forward_output path.
+        if self._enable_buffer:
+            max_num_tokens = config.max_batch_size * config.max_seq_len
+            self.output_buffer_ = torch.empty(
+                (max_num_tokens, config.hidden_size),
+                dtype=dtype,
+                device=device,
+                requires_grad=False,
+            )
+            self.uvqk_buffer_ = torch.empty(
+                (
+                    max_num_tokens,
+                    (self._linear_dim_per_head * 2 + self._attention_dim_per_head * 2)
+                    * self._num_heads,
+                ),
+                dtype=dtype,
+                device=device,
+                requires_grad=False,
+            )
+        else:
+            self.output_buffer_ = None
+            self.uvqk_buffer_ = None
 
         sm = torch.cuda.get_device_properties(0).major
         if sm == 8:
@@ -283,6 +289,18 @@ class PagedHSTUInferLayer(torch.nn.Module):
         if use_kvcache:
             kv_cache_table = kv_cache_metadata.kv_cache_table[self.layer_idx]
             (paged_k_cache, paged_v_cache) = kv_cache_table.unbind(dim=1)
+            # # print args
+            # print(f"[PAGED_HSTU] append_kvcache args:")
+            # print(f"key.shape={key.shape}, value.shape={value.shape}")
+            # print(f"kv_cache_metadata.batch_indices.shape={kv_cache_metadata.batch_indices.shape}")
+            # print(f"kv_cache_metadata.position.shape={kv_cache_metadata.position.shape}")
+            # print(f"jd.num_candidates_offsets.shape={jd.num_candidates_offsets.shape}")
+            # print(f"kv_cache_metadata.new_history_nnz_cuda.shape={kv_cache_metadata.new_history_nnz_cuda.shape}")
+            # print(f"num_tokens={num_tokens}")
+            # print(f"paged_k_cache.shape={paged_k_cache.shape}, paged_v_cache.shape={paged_v_cache.shape}")
+            # print(f"kv_cache_metadata.kv_indices.shape={kv_cache_metadata.kv_indices.shape}")
+            # print(f"kv_cache_metadata.kv_indptr.shape={kv_cache_metadata.kv_indptr.shape}")
+            # print(f"kv_cache_metadata.kv_last_page_len.shape={kv_cache_metadata.kv_last_page_len.shape}")
             paged_kvcache_ops.append_kvcache(
                 key,
                 value,
@@ -350,6 +368,11 @@ class PagedHSTUInferLayer(torch.nn.Module):
         jd: JaggedData,
         kv_cache_metadata,
     ) -> JaggedData:
+        if not self._enable_buffer:
+            raise RuntimeError("forward_input is disabled when enable_buffer=False")
+        uvqk_buffer = self.uvqk_buffer_
+        assert uvqk_buffer is not None
+
         input_tensor = input_buffer[:num_tokens, ...]
         normed_input, _, _, _, _ = triton_weighted_layer_norm_fwd(
             x=input_tensor,
@@ -359,10 +382,10 @@ class PagedHSTUInferLayer(torch.nn.Module):
         )
 
         self.uvqk_addmm_inplace_impl(
-            normed_input, self.uvqk_buffer_[:num_tokens, ...], num_tokens
+            normed_input, uvqk_buffer[:num_tokens, ...], num_tokens
         )
         (user, value, query, key) = torch.split(
-            self.uvqk_buffer_[:num_tokens, ...],
+            uvqk_buffer[:num_tokens, ...],
             self._split_arg_list,
             dim=-1,
         )
@@ -389,7 +412,7 @@ class PagedHSTUInferLayer(torch.nn.Module):
                 0,  # NHD layout
             )
 
-        return self.uvqk_buffer_[:num_tokens, ...]
+        return uvqk_buffer[:num_tokens, ...]
 
     @torch.inference_mode()
     def forward_output(
@@ -400,8 +423,15 @@ class PagedHSTUInferLayer(torch.nn.Module):
         jd: JaggedData,
         kv_cache_metadata,
     ) -> JaggedData:
+        if not self._enable_buffer:
+            raise RuntimeError("forward_output is disabled when enable_buffer=False")
+        uvqk_buffer = self.uvqk_buffer_
+        output_buffer = self.output_buffer_
+        assert uvqk_buffer is not None
+        assert output_buffer is not None
+
         (user, value, query, key) = torch.split(
-            self.uvqk_buffer_[:num_tokens, ...],
+            uvqk_buffer[:num_tokens, ...],
             self._split_arg_list,
             dim=-1,
         )
@@ -452,10 +482,10 @@ class PagedHSTUInferLayer(torch.nn.Module):
             self.proj_addmm_inplace_impl(
                 parallel_input,
                 input_buffer[:num_tokens, ...],
-                self.output_buffer_[:num_tokens, ...],
+                output_buffer[:num_tokens, ...],
                 num_tokens,
             )
         else:
-            self.output_buffer_[:num_tokens, ...] = self._linear_proj(parallel_input)
+            output_buffer[:num_tokens, ...] = self._linear_proj(parallel_input)
 
-        return self.output_buffer_[:num_tokens, ...]
+        return output_buffer[:num_tokens, ...]

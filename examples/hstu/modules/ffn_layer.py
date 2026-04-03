@@ -73,14 +73,6 @@ class FFNLayer(torch.nn.Module):
         self._linear_up_weight = self._linear_up.weight.T.contiguous()
         self._linear_down_weight = self._linear_down.weight.T.contiguous()
 
-        max_num_tokens = config.max_batch_size * config.max_seq_len
-        self.output_buffer_ = torch.empty(
-            (max_num_tokens, config.hidden_size),
-            dtype=dtype,
-            device=device,
-            requires_grad=False,
-        )
-
         sm = torch.cuda.get_device_properties(0).major
         if sm == 8:
             self.addmm_silu_impl = triton_addmm_silu_fwd
@@ -134,5 +126,4 @@ class FFNLayer(torch.nn.Module):
             output = self.down_addmm_impl(hidden, layer_input, num_tokens)
         else:
             output = self._linear_down(hidden)
-        self.output_buffer_[:num_tokens, ...].copy_(output, non_blocking=True)
         return output

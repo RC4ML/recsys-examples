@@ -24,6 +24,7 @@ class HSTUBlockInference(torch.nn.Module):
         self,
         config: InferenceHSTUConfig,
         kvcache_config: KVCacheConfig,
+        enable_buffer: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -33,7 +34,12 @@ class HSTUBlockInference(torch.nn.Module):
 
         self._hstu_layers = torch.nn.ModuleList(
             [
-                PagedHSTULayer(config, kvcache_config, layer_idx)
+                PagedHSTULayer(
+                    config,
+                    kvcache_config,
+                    layer_idx,
+                    enable_buffer=enable_buffer,
+                )
                 for layer_idx in range(self.config.num_layers)
             ]
         )
