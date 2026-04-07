@@ -1,6 +1,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import math
+import time
 from typing import Any, Dict, Optional
 
 import torch
@@ -91,6 +92,40 @@ class HSTUBlockInference(torch.nn.Module):
                 hidden_states,
                 kv_cache_metadata,
             )
+
+    def predict_one_layer(
+        self,
+        layer_idx: int,
+        batch_size: int,
+        num_tokens: int,
+        hidden_states: torch.Tensor,
+        jd: JaggedData,
+        kv_cache_metadata,
+    ) -> torch.Tensor:
+        if layer_idx < 0 or layer_idx >= len(self._hstu_layers):
+            raise IndexError(f"Invalid HSTU layer index: {layer_idx}")
+        hstu_layer = self._hstu_layers[layer_idx]
+
+        # stream = torch.cuda.current_stream(hidden_states.device)
+        # start_evt = torch.cuda.Event(enable_timing=True)
+        # end_evt = torch.cuda.Event(enable_timing=True)
+        # start_evt.record(stream)
+        res = hstu_layer.forward_naive(
+            batch_size,
+            num_tokens,
+            hidden_states,
+            jd,
+            kv_cache_metadata,
+        )
+        # end_evt.record(stream)
+        # stream.synchronize()
+        # elapsed_ms = float(start_evt.elapsed_time(end_evt))
+
+        # print(
+        #     f"[HSTUBlockInference] predict_one_layer layer={layer_idx} "
+        #     f"batch_size={batch_size} num_tokens={num_tokens} time_ms={elapsed_ms:.3f}"
+        # )
+        return res
 
     def predict_naive(
         self,
